@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Leading Light – Safety Navigation</title>
+  <meta name="description" content="A safety-focused navigation prototype that prioritizes emotional design, community reporting, and safer route suggestions.">
+  <meta name="theme-color" content="#0F0F1A">
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+  <!-- App CSS -->
+  <link rel="stylesheet" href="css/styles.css">
+
+  <!-- Inter font -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <!-- ====== APP SHELL ====== -->
+  <div id="app" class="app">
+
+    <!-- Top bar -->
+    <header class="topbar">
+      <button class="topbar__menu" aria-label="Menu" id="menu-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="3" y1="12" x2="21" y2="12"/>
+          <line x1="3" y1="6" x2="21" y2="6"/>
+          <line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+      </button>
+      <h1 class="topbar__title">
+        <span class="topbar__icon">💡</span>
+        Leading Light
+      </h1>
+      <button class="topbar__locate" aria-label="Center on my location" id="locate-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>
+        </svg>
+      </button>
+    </header>
+
+    <!-- Map container -->
+    <div id="map" class="map"></div>
+
+    <!-- Search / route bar -->
+    <div class="search-bar" id="search-bar">
+      <div class="search-bar__input-wrap">
+        <svg class="search-bar__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8"/>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input type="text" class="search-bar__input" id="search-input" placeholder="Where are you going?" autocomplete="off">
+      </div>
+      <div class="search-bar__suggestions" id="search-suggestions"></div>
+    </div>
+
+    <!-- Route panel (hidden until route is active) -->
+    <div class="route-panel" id="route-panel">
+      <div class="route-panel__header">
+        <h2 class="route-panel__title">Route Options</h2>
+        <button class="route-panel__close" id="route-close" aria-label="Close routes">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+      <div class="route-panel__options" id="route-options">
+        <!-- Populated by JS -->
+      </div>
+    </div>
+
+    <!-- Emergency SOS button -->
+    <button class="sos-btn" id="sos-btn" aria-label="Emergency SOS">
+      <span class="sos-btn__pulse"></span>
+      <span class="sos-btn__inner">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6A19.79 19.79 0 012.12 4.18 2 2 0 014.11 2h3a2 2 0 012 1.72 12.84 12.84 0 00.7 2.81 2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45 12.84 12.84 0 002.81.7A2 2 0 0122 16.92z"/>
+        </svg>
+        SOS
+      </span>
+    </button>
+
+    <!-- Community report button -->
+    <button class="report-btn" id="report-btn" aria-label="Report safety concern">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+        <line x1="12" y1="9" x2="12" y2="13"/>
+        <line x1="12" y1="17" x2="12.01" y2="17"/>
+      </svg>
+    </button>
+
+    <!-- Report modal -->
+    <div class="modal-overlay" id="report-modal">
+      <div class="modal">
+        <div class="modal__header">
+          <h2 class="modal__title">Report Safety Concern</h2>
+          <button class="modal__close" id="report-modal-close" aria-label="Close">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/>
+              <line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <p class="modal__desc">Tap a category to quickly flag this area. Your report helps others stay safe.</p>
+        <div class="report-grid" id="report-grid">
+          <button class="report-option" data-type="poor-lighting">
+            <span class="report-option__icon">🔦</span>
+            <span class="report-option__label">Poor Lighting</span>
+          </button>
+          <button class="report-option" data-type="harassment">
+            <span class="report-option__icon">⚠️</span>
+            <span class="report-option__label">Harassment</span>
+          </button>
+          <button class="report-option" data-type="unsafe-road">
+            <span class="report-option__icon">🚧</span>
+            <span class="report-option__label">Unsafe Road</span>
+          </button>
+          <button class="report-option" data-type="suspicious">
+            <span class="report-option__icon">👁️</span>
+            <span class="report-option__label">Suspicious Activity</span>
+          </button>
+          <button class="report-option" data-type="closed-path">
+            <span class="report-option__icon">🚫</span>
+            <span class="report-option__label">Closed Path</span>
+          </button>
+          <button class="report-option" data-type="other">
+            <span class="report-option__icon">📝</span>
+            <span class="report-option__label">Other</span>
+          </button>
+        </div>
+        <div class="report-confirm" id="report-confirm">
+          <span class="report-confirm__icon">✅</span>
+          <p class="report-confirm__text">Thank you! Your report has been submitted.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- SOS modal -->
+    <div class="modal-overlay" id="sos-modal">
+      <div class="modal modal--sos">
+        <div class="modal__header">
+          <h2 class="modal__title">Emergency Alert</h2>
+          <button class="modal__close" id="sos-modal-close" aria-label="Close">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/>
+              <line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <div class="sos-content">
+          <div class="sos-countdown" id="sos-countdown">
+            <span class="sos-countdown__number" id="sos-timer">5</span>
+            <span class="sos-countdown__label">Sending alert in…</span>
+          </div>
+          <p class="sos-content__text">Your location and an emergency message will be sent to your emergency contacts.</p>
+          <div class="sos-contacts">
+            <div class="sos-contact">
+              <div class="sos-contact__avatar">MT</div>
+              <div class="sos-contact__info">
+                <span class="sos-contact__name">Mom</span>
+                <span class="sos-contact__number">+1 (555) 012-3456</span>
+              </div>
+            </div>
+            <div class="sos-contact">
+              <div class="sos-contact__avatar">JD</div>
+              <div class="sos-contact__info">
+                <span class="sos-contact__name">Jake (Roommate)</span>
+                <span class="sos-contact__number">+1 (555) 987-6543</span>
+              </div>
+            </div>
+          </div>
+          <button class="btn btn--danger btn--full" id="sos-send-now">Send Now</button>
+          <button class="btn btn--ghost btn--full" id="sos-cancel">Cancel</button>
+          <div class="sos-sent" id="sos-sent">
+            <span class="sos-sent__icon">📡</span>
+            <p class="sos-sent__text">Alert sent! Your contacts have been notified with your location.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Side menu drawer -->
+    <div class="drawer-overlay" id="drawer-overlay"></div>
+    <nav class="drawer" id="drawer" aria-label="App menu">
+      <div class="drawer__header">
+        <span class="drawer__logo">💡</span>
+        <span class="drawer__title">Leading Light</span>
+      </div>
+      <ul class="drawer__links">
+        <li><a href="#" class="drawer__link drawer__link--active">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+          Map
+        </a></li>
+        <li><a href="#" class="drawer__link">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Recent Routes
+        </a></li>
+        <li><a href="#" class="drawer__link">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+          Emergency Contacts
+        </a></li>
+        <li><a href="#" class="drawer__link">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+          Settings
+        </a></li>
+      </ul>
+      <div class="drawer__footer">
+        <p class="drawer__version">Leading Light v0.1 – Prototype</p>
+      </div>
+    </nav>
+
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- App modules -->
+  <script src="js/map.js"></script>
+  <script src="js/routes.js"></script>
+  <script src="js/emergency.js"></script>
+  <script src="js/reports.js"></script>
+  <script src="js/app.js"></script>
+
+</body>
+</html>
