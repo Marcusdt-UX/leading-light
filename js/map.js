@@ -727,7 +727,7 @@ const MapModule = (() => {
 
         /* Persist this position in the danger registry */
         const sev = CRIME_ICONS[crime.category]?.severity || 3;
-        registerDangerZone(clat, clng, 100, sev);
+        registerDangerZone(clat, clng, 200, sev);
       });
 
       crimeLoaded = true;
@@ -835,7 +835,7 @@ const MapModule = (() => {
         crimeMarkers.push(marker);
 
         /* Persist this position in the danger registry */
-        registerDangerZone(clat, clng, 100, info.severity || 3);
+        registerDangerZone(clat, clng, 200, info.severity || 3);
       });
 
       crimeLoaded = true;
@@ -1031,7 +1031,7 @@ const MapModule = (() => {
         crimeMarkers.push(marker);
 
         /* Persist this position in the danger registry */
-        registerDangerZone(alat, alng, 120, 4);
+        registerDangerZone(alat, alng, 200, 4);
       }
 
       crimeLoaded = true;
@@ -1290,7 +1290,7 @@ const MapModule = (() => {
         const k = _dangerKey(ll.lat, ll.lng);
         if (!seen.has(k) && bounds.contains(ll)) {
           seen.add(k);
-          zones.push({ lat: ll.lat, lng: ll.lng, radius: 100, severity: 3 });
+          zones.push({ lat: ll.lat, lng: ll.lng, radius: 200, severity: 3 });
         }
       } catch (_) { /* marker may have been removed */ }
     });

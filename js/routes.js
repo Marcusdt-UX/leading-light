@@ -62,19 +62,20 @@ const RoutesModule = (() => {
 
   /**
    * Walk along a route's coordinate array and find segments that fall
-   * inside any danger zone.  Returns an array of { lat, lng, severity }
-   * representing the centres of route-danger intersections.
+   * inside or near any danger zone.  Returns an array of hits.
+   * Uses a generous buffer so routes that pass *near* crime zones
+   * (not just directly through) also trigger avoidance.
    */
   function findDangerIntersections(routeCoords, dangerZones) {
     const hits = [];     /* { lat, lng, severity, idx } */
-    const step = Math.max(1, Math.floor(routeCoords.length / 200));
+    const step = Math.max(1, Math.floor(routeCoords.length / 250));
 
     for (let i = 0; i < routeCoords.length; i += step) {
       const [lat, lng] = routeCoords[i];
       for (const dz of dangerZones) {
         const d = _quickDistMeters(lat, lng, dz.lat, dz.lng);
-        /* Route point is inside or very near the danger radius (+100 m buffer) */
-        if (d < (dz.radius || 100) + 100) {
+        /* Detect within danger radius + 250 m buffer (catches "near-miss" routes) */
+        if (d < (dz.radius || 100) + 250) {
           hits.push({ lat, lng, dzLat: dz.lat, dzLng: dz.lng, severity: dz.severity || 3, idx: i });
           break; /* one hit per sample point is enough */
         }
