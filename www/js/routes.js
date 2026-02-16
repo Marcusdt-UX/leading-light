@@ -50,7 +50,7 @@ const RoutesModule = (() => {
     document.getElementById('directionsShowMap')?.addEventListener('click', showMapWithRoute);
   }
 
-  /* ===== AVOIDANCE WAYPOINT ALGORITHM (two-pass) ===== */
+  /* ===== AVOIDANCE WAYPOINT ALGORITHM (bearing-aware, iterative) ===== */
 
   /** Quick haversine-ish distance in metres (good enough for short ranges) */
   function _quickDistMeters(lat1, lng1, lat2, lng2) {
@@ -58,6 +58,42 @@ const RoutesModule = (() => {
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLng = (lng2 - lng1) * Math.PI / 180 * Math.cos(lat1 * Math.PI / 180);
     return R * Math.sqrt(dLat * dLat + dLng * dLng);
+  }
+
+  /**
+   * True initial bearing (forward azimuth) from point 1 → point 2.
+   * Returns degrees 0-360.
+   */
+  function _bearingDeg(lat1, lng1, lat2, lng2) {
+    const toRad = Math.PI / 180;
+    const φ1 = lat1 * toRad, φ2 = lat2 * toRad;
+    const Δλ = (lng2 - lng1) * toRad;
+    const y = Math.sin(Δλ) * Math.cos(φ2);
+    const x = Math.cos(φ1) * Math.sin(φ2)
+            - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+  }
+
+  /**
+   * Move a point along a given bearing by `distMeters`.
+   * Uses the geodesic "destination point" formula — works at any angle.
+   */
+  function _offsetPoint(lat, lng, bearingDeg, distMeters) {
+    const R = 6371000;
+    const toRad = Math.PI / 180;
+    const φ1 = lat * toRad;
+    const λ1 = lng * toRad;
+    const brng = bearingDeg * toRad;
+    const δ = distMeters / R;              /* angular distance */
+    const φ2 = Math.asin(
+      Math.sin(φ1) * Math.cos(δ) +
+      Math.cos(φ1) * Math.sin(δ) * Math.cos(brng)
+    );
+    const λ2 = λ1 + Math.atan2(
+      Math.sin(brng) * Math.sin(δ) * Math.cos(φ1),
+      Math.cos(δ) - Math.sin(φ1) * Math.sin(φ2)
+    );
+    return { lat: φ2 / toRad, lng: λ2 / toRad };
   }
 
   /**
@@ -89,13 +125,13 @@ const RoutesModule = (() => {
    * and produce **bracketing** waypoints that force the route to go
    * AROUND the danger zone rather than through it.
    *
-   * For each danger cluster we emit THREE waypoints:
-   *   1. ENTRY  — before the zone, offset to one side
-   *   2. BYPASS — at the zone, offset further to the same side
-   *   3. EXIT   — after the zone, offset to the same side
+   * Uses **true geodesic bearing math** so it works correctly on roads
+   * at any angle — not just grid-aligned 90° streets.
    *
-   * This creates an arc that OSRM must follow, preventing it from
-   * clipping back through the danger area.
+   * For each danger cluster we emit THREE waypoints:
+   *   1. ENTRY  — before the zone, offset perpendicular to the LOCAL road bearing
+   *   2. BYPASS — at the zone, offset further using LOCAL bearing
+   *   3. EXIT   — after the zone, offset using LOCAL bearing
    *
    * @param {Array} routeCoords – [[lat,lng], …]
    * @param {Array} hits – from findDangerIntersections
@@ -118,6 +154,34 @@ const RoutesModule = (() => {
     const waypoints = [];
     const totalPts = routeCoords.length;
 
+    /**
+     * Compute the true bearing of the road at a given route index,
+     * using a small window of surrounding points for smoothness.
+     */
+    function localBearing(idx) {
+      const r = 5;
+      const i0 = Math.max(0, idx - r);
+      const i1 = Math.min(totalPts - 1, idx + r);
+      return _bearingDeg(
+        routeCoords[i0][0], routeCoords[i0][1],
+        routeCoords[i1][0], routeCoords[i1][1]
+      );
+    }
+
+    /**
+     * Decide which perpendicular side (left or right of the road
+     * bearing) is AWAY from the danger zone centre.
+     */
+    function safeSideBearing(ptLat, ptLng, roadBearing, dzLat, dzLng) {
+      const perpLeft  = (roadBearing + 270) % 360;
+      const perpRight = (roadBearing +  90) % 360;
+      const toBearing = _bearingDeg(ptLat, ptLng, dzLat, dzLng);
+      /* Signed angle from perpRight to danger bearing */
+      const diff = ((toBearing - perpRight + 540) % 360) - 180;
+      /* If danger is closer to the right perpendicular, go left (and vice versa) */
+      return Math.abs(diff) < 90 ? perpLeft : perpRight;
+    }
+
     clusters.forEach(cl => {
       /* Index range of this cluster on the route */
       const firstIdx = cl[0].idx;
@@ -134,51 +198,30 @@ const RoutesModule = (() => {
       const dzLat = cl.reduce((s, h) => s + h.dzLat, 0) / cl.length;
       const dzLng = cl.reduce((s, h) => s + h.dzLng, 0) / cl.length;
 
-      /* Route direction at this segment (used to compute perpendicular) */
-      const prev = routeCoords[Math.max(0, entryIdx)];
-      const next = routeCoords[Math.min(totalPts - 1, exitIdx)];
-      const dx = next[1] - prev[1];   /* lng diff */
-      const dy = next[0] - prev[0];   /* lat diff */
-      const dLen = Math.sqrt(dx * dx + dy * dy) || 0.0001;
+      /* Offset distances in **metres** — geodesic functions handle the conversion */
+      const baseOffsetM  = 400 + cl.length * 100;   /* 400 m base, grows with cluster size */
+      const bypassExtraM = 150;                       /* extra 150 m for the middle waypoint */
 
-      /* Perpendicular unit vector (always pick the side AWAY from the danger zone) */
-      const perpLat = -dx / dLen;
-      const perpLng =  dy / dLen;
-
-      /* Which side of the route is the danger zone? Push to the opposite side. */
-      const midPt = routeCoords[safeMiddle];
-      const toDzLat = dzLat - midPt[0];
-      const toDzLng = dzLng - midPt[1];
-      const dotPerp = toDzLat * perpLat + toDzLng * perpLng;
-      const side = dotPerp >= 0 ? -1 : 1;
-
-      /* Offset distances (in degrees, ~111320 m per degree) */
-      const baseOffset = (400 + cl.length * 100) / 111320;  /* 400 m base */
-      const bypassExtra = 150 / 111320;                      /* extra 150 m for the middle */
-
-      /* 1. ENTRY waypoint — before the zone, offset to the safe side */
-      const ePt = routeCoords[entryIdx];
-      waypoints.push({
-        lat: ePt[0] + perpLat * side * baseOffset,
-        lng: ePt[1] + perpLng * side * baseOffset,
-        _order: entryIdx
-      });
+      /* 1. ENTRY waypoint — offset perpendicular to LOCAL road bearing */
+      const ePt      = routeCoords[entryIdx];
+      const eBearing  = localBearing(entryIdx);
+      const eSafeBrg  = safeSideBearing(ePt[0], ePt[1], eBearing, dzLat, dzLng);
+      const eOff      = _offsetPoint(ePt[0], ePt[1], eSafeBrg, baseOffsetM);
+      waypoints.push({ lat: eOff.lat, lng: eOff.lng, _order: entryIdx });
 
       /* 2. BYPASS waypoint — at the zone, offset further */
-      const mPt = routeCoords[safeMiddle];
-      waypoints.push({
-        lat: mPt[0] + perpLat * side * (baseOffset + bypassExtra),
-        lng: mPt[1] + perpLng * side * (baseOffset + bypassExtra),
-        _order: safeMiddle
-      });
+      const mPt      = routeCoords[safeMiddle];
+      const mBearing  = localBearing(safeMiddle);
+      const mSafeBrg  = safeSideBearing(mPt[0], mPt[1], mBearing, dzLat, dzLng);
+      const mOff      = _offsetPoint(mPt[0], mPt[1], mSafeBrg, baseOffsetM + bypassExtraM);
+      waypoints.push({ lat: mOff.lat, lng: mOff.lng, _order: safeMiddle });
 
       /* 3. EXIT waypoint — after the zone, offset to the same side */
-      const xPt = routeCoords[exitIdx];
-      waypoints.push({
-        lat: xPt[0] + perpLat * side * baseOffset,
-        lng: xPt[1] + perpLng * side * baseOffset,
-        _order: exitIdx
-      });
+      const xPt      = routeCoords[exitIdx];
+      const xBearing  = localBearing(exitIdx);
+      const xSafeBrg  = safeSideBearing(xPt[0], xPt[1], xBearing, dzLat, dzLng);
+      const xOff      = _offsetPoint(xPt[0], xPt[1], xSafeBrg, baseOffsetM);
+      waypoints.push({ lat: xOff.lat, lng: xOff.lng, _order: exitIdx });
     });
 
     /* Sort by route order and cap at 9 (3 per cluster × 3 clusters max) */
@@ -249,33 +292,62 @@ const RoutesModule = (() => {
       const dangerZones = MapModule.getDangerZones(routeBounds);
       console.log(`[Routes] ${dangerZones.length} danger zones in route corridor`);
 
-      /* ── Detect where the direct route passes through danger zones ── */
-      const hits = findDangerIntersections(allCoordsDirect, dangerZones);
-      console.log(`[Routes] ${hits.length} danger-zone intersections found on direct route`);
+      /* ═══ ITERATIVE DETOUR REFINEMENT ═══
+         Instead of a single pass-2, we loop up to MAX_ITERATIONS:
+         1. Find danger-zone intersections on the CURRENT best route
+         2. Build bearing-aware detour waypoints
+         3. Query OSRM with those waypoints
+         4. Check the NEW route for remaining intersections
+         5. If still hitting danger zones, repeat with the new geometry
+         This converges even on complex, non-grid road networks. */
+      const MAX_ITER = 3;
+      let bestRoute  = directData.routes[0];
+      let bestCoords = allCoordsDirect;
+      let iterWPs    = [];              /* accumulated waypoints across iterations */
+      let safeRoutes = [];              /* all safe-route alternatives found */
 
-      let finalData;
-      if (hits.length > 0) {
-        /* ── PASS 2: re-route with avoidance waypoints ── */
-        const detourWPs = buildDetourWaypoints(allCoordsDirect, hits);
-        console.log(`[Routes] Inserting ${detourWPs.length} detour waypoint(s):`, detourWPs);
-        const safeUrl = _osrmUrl(origin, destination, detourWPs);
-        console.log('[Routes] Pass 2 (avoidance):', safeUrl);
+      for (let iter = 0; iter < MAX_ITER; iter++) {
+        const hits = findDangerIntersections(bestCoords, dangerZones);
+        console.log(`[Routes] Iteration ${iter + 1}: ${hits.length} danger intersections`);
+        if (hits.length === 0) break;   /* route is clear — done */
+
+        const newWPs = buildDetourWaypoints(bestCoords, hits);
+        /* Merge with waypoints from previous iterations (dedup by proximity) */
+        newWPs.forEach(wp => {
+          const dup = iterWPs.some(e => _quickDistMeters(e.lat, e.lng, wp.lat, wp.lng) < 120);
+          if (!dup) iterWPs.push(wp);
+        });
+        /* Sort merged WPs by rough route order (distance from origin) */
+        iterWPs.sort((a, b) =>
+          _quickDistMeters(origin.lat, origin.lng, a.lat, a.lng) -
+          _quickDistMeters(origin.lat, origin.lng, b.lat, b.lng)
+        );
+        /* Cap to 12 waypoints (OSRM practical limit) */
+        const cappedWPs = iterWPs.slice(0, 12);
+        console.log(`[Routes] Iteration ${iter + 1}: querying OSRM with ${cappedWPs.length} waypoints`);
 
         try {
+          const safeUrl  = _osrmUrl(origin, destination, cappedWPs);
           const safeData = await _osrmFetch(safeUrl, 12000);
           if (safeData.routes && safeData.routes.length > 0) {
-            /* Merge: use **both** the safe-route set and the direct set,
-               then deduplicate later via safety scoring */
-            finalData = { routes: [...safeData.routes, ...directData.routes] };
+            safeRoutes.push(...safeData.routes);
+            /* Use the first safe route as the basis for the next iteration */
+            bestRoute  = safeData.routes[0];
+            bestCoords = bestRoute.geometry.coordinates.map(c => [c[1], c[0]]);
           } else {
-            finalData = directData;
+            break; /* OSRM returned nothing — keep what we have */
           }
         } catch (e2) {
-          console.warn('[Routes] Avoidance pass failed, falling back to direct:', e2.message);
-          finalData = directData;
+          console.warn(`[Routes] Iteration ${iter + 1} avoidance query failed:`, e2.message);
+          break;
         }
+      }
+
+      /* Merge safe routes with direct routes, deduplicate later */
+      let finalData;
+      if (safeRoutes.length > 0) {
+        finalData = { routes: [...safeRoutes, ...directData.routes] };
       } else {
-        /* Direct route is already clear of danger zones */
         finalData = directData;
       }
 
