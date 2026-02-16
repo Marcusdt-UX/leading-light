@@ -67,14 +67,14 @@ const RoutesModule = (() => {
    */
   function findDangerIntersections(routeCoords, dangerZones) {
     const hits = [];     /* { lat, lng, severity, idx } */
-    const step = Math.max(1, Math.floor(routeCoords.length / 120));
+    const step = Math.max(1, Math.floor(routeCoords.length / 200));
 
     for (let i = 0; i < routeCoords.length; i += step) {
       const [lat, lng] = routeCoords[i];
       for (const dz of dangerZones) {
         const d = _quickDistMeters(lat, lng, dz.lat, dz.lng);
-        /* Route point is inside the danger radius (+50 m buffer) */
-        if (d < (dz.radius || 100) + 50) {
+        /* Route point is inside or very near the danger radius (+100 m buffer) */
+        if (d < (dz.radius || 100) + 100) {
           hits.push({ lat, lng, dzLat: dz.lat, dzLng: dz.lng, severity: dz.severity || 3, idx: i });
           break; /* one hit per sample point is enough */
         }
@@ -85,7 +85,16 @@ const RoutesModule = (() => {
 
   /**
    * Given a set of danger-intersection hits along a route, cluster them
-   * and produce offset waypoints that push the route to the opposite side.
+   * and produce **bracketing** waypoints that force the route to go
+   * AROUND the danger zone rather than through it.
+   *
+   * For each danger cluster we emit THREE waypoints:
+   *   1. ENTRY  — before the zone, offset to one side
+   *   2. BYPASS — at the zone, offset further to the same side
+   *   3. EXIT   — after the zone, offset to the same side
+   *
+   * This creates an arc that OSRM must follow, preventing it from
+   * clipping back through the danger area.
    *
    * @param {Array} routeCoords – [[lat,lng], …]
    * @param {Array} hits – from findDangerIntersections
@@ -106,49 +115,74 @@ const RoutesModule = (() => {
     }
 
     const waypoints = [];
+    const totalPts = routeCoords.length;
 
     clusters.forEach(cl => {
-      /* Centre of the cluster on the route */
-      const midIdx = Math.round(cl.reduce((s, h) => s + h.idx, 0) / cl.length);
-      const safeMid = Math.min(Math.max(midIdx, 2), routeCoords.length - 3);
+      /* Index range of this cluster on the route */
+      const firstIdx = cl[0].idx;
+      const lastIdx  = cl[cl.length - 1].idx;
+      const midIdx   = Math.round((firstIdx + lastIdx) / 2);
+
+      /* Safe indices for entry / mid / exit, with margin from route ends */
+      const margin = Math.max(8, Math.round((lastIdx - firstIdx) * 0.4));
+      const entryIdx = Math.max(3, firstIdx - margin);
+      const exitIdx  = Math.min(totalPts - 4, lastIdx + margin);
+      const safeMiddle = Math.min(Math.max(midIdx, 3), totalPts - 4);
 
       /* Average danger-zone position */
       const dzLat = cl.reduce((s, h) => s + h.dzLat, 0) / cl.length;
       const dzLng = cl.reduce((s, h) => s + h.dzLng, 0) / cl.length;
 
-      /* Route position at the cluster centre */
-      const rLat = routeCoords[safeMid][0];
-      const rLng = routeCoords[safeMid][1];
+      /* Route direction at this segment (used to compute perpendicular) */
+      const prev = routeCoords[Math.max(0, entryIdx)];
+      const next = routeCoords[Math.min(totalPts - 1, exitIdx)];
+      const dx = next[1] - prev[1];   /* lng diff */
+      const dy = next[0] - prev[0];   /* lat diff */
+      const dLen = Math.sqrt(dx * dx + dy * dy) || 0.0001;
 
-      /* Direction from the danger zone to the route point */
-      let awayLat = rLat - dzLat;
-      let awayLng = rLng - dzLng;
-      const len = Math.sqrt(awayLat * awayLat + awayLng * awayLng);
+      /* Perpendicular unit vector (always pick the side AWAY from the danger zone) */
+      const perpLat = -dx / dLen;
+      const perpLng =  dy / dLen;
 
-      if (len < 0.000001) {
-        /* Route sits right on top of the danger zone — push perpendicular to the route direction */
-        const prev = routeCoords[Math.max(0, safeMid - 5)];
-        const next = routeCoords[Math.min(routeCoords.length - 1, safeMid + 5)];
-        const dx = next[1] - prev[1];
-        const dy = next[0] - prev[0];
-        const dLen = Math.sqrt(dx * dx + dy * dy) || 0.0001;
-        awayLat = -dx / dLen;  /* perpendicular */
-        awayLng = dy / dLen;
-      } else {
-        awayLat /= len;
-        awayLng /= len;
-      }
+      /* Which side of the route is the danger zone? Push to the opposite side. */
+      const midPt = routeCoords[safeMiddle];
+      const toDzLat = dzLat - midPt[0];
+      const toDzLng = dzLng - midPt[1];
+      const dotPerp = toDzLat * perpLat + toDzLng * perpLng;
+      const side = dotPerp >= 0 ? -1 : 1;
 
-      /* Offset distance: 350 m base + 80 m per cluster member (in degrees) */
-      const offsetDeg = (350 + cl.length * 80) / 111320;
+      /* Offset distances (in degrees, ~111320 m per degree) */
+      const baseOffset = (400 + cl.length * 100) / 111320;  /* 400 m base */
+      const bypassExtra = 150 / 111320;                      /* extra 150 m for the middle */
 
+      /* 1. ENTRY waypoint — before the zone, offset to the safe side */
+      const ePt = routeCoords[entryIdx];
       waypoints.push({
-        lat: rLat + awayLat * offsetDeg,
-        lng: rLng + awayLng * offsetDeg
+        lat: ePt[0] + perpLat * side * baseOffset,
+        lng: ePt[1] + perpLng * side * baseOffset,
+        _order: entryIdx
+      });
+
+      /* 2. BYPASS waypoint — at the zone, offset further */
+      const mPt = routeCoords[safeMiddle];
+      waypoints.push({
+        lat: mPt[0] + perpLat * side * (baseOffset + bypassExtra),
+        lng: mPt[1] + perpLng * side * (baseOffset + bypassExtra),
+        _order: safeMiddle
+      });
+
+      /* 3. EXIT waypoint — after the zone, offset to the same side */
+      const xPt = routeCoords[exitIdx];
+      waypoints.push({
+        lat: xPt[0] + perpLat * side * baseOffset,
+        lng: xPt[1] + perpLng * side * baseOffset,
+        _order: exitIdx
       });
     });
 
-    return waypoints.slice(0, 5); /* cap at 5 for OSRM performance */
+    /* Sort by route order and cap at 9 (3 per cluster × 3 clusters max) */
+    waypoints.sort((a, b) => a._order - b._order);
+    return waypoints.slice(0, 9);
   }
 
   /** Build an OSRM URL for foot routing */
