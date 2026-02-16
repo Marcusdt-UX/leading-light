@@ -229,12 +229,25 @@ const RoutesModule = (() => {
     return waypoints.slice(0, 9);
   }
 
-  /** Build an OSRM URL for foot routing */
+  /** Build an OSRM URL for foot routing.
+   *  When via-points are present we add `radiuses=` so OSRM snaps each
+   *  detour waypoint to the nearest actual road (up to 1 000 m).
+   *  Without this, off-road waypoints cause straight-line segments. */
   function _osrmUrl(origin, destination, viaPoints) {
     let coords = `${origin.lng},${origin.lat}`;
-    (viaPoints || []).forEach(wp => { coords += `;${wp.lng},${wp.lat}`; });
+    const via = viaPoints || [];
+    via.forEach(wp => { coords += `;${wp.lng},${wp.lat}`; });
     coords += `;${destination.lng},${destination.lat}`;
-    return `https://router.project-osrm.org/route/v1/foot/${coords}?overview=full&geometries=geojson&alternatives=true&steps=true`;
+
+    let url = `https://router.project-osrm.org/route/v1/foot/${coords}`
+            + `?overview=full&geometries=geojson&alternatives=true&steps=true`;
+
+    if (via.length > 0) {
+      /* radiuses: origin=unlimited, each via=1000m snap, destination=unlimited */
+      const radii = ['unlimited', ...via.map(() => '1000'), 'unlimited'].join(';');
+      url += `&radiuses=${radii}`;
+    }
+    return url;
   }
 
   /** Fetch JSON from OSRM with a timeout */
