@@ -12,6 +12,25 @@ const MapModule = (() => {
   let userLatLng = null;   /* most-recent real position */
   let crimeLoaded = false;
 
+  /* ===== PERSISTENT DANGER ZONE REGISTRY =====
+   * Accumulates every real crime marker AND every simulated hotspot
+   * position that has ever been loaded during the session.
+   * Keyed by a spatial hash so duplicates are ignored.
+   * This registry is what the routing engine consults — it survives
+   * map pans and marker reloads.                                     */
+  const _dangerRegistry = {};   /* key → { lat, lng, radius, severity } */
+
+  function _dangerKey(lat, lng) {
+    return `${lat.toFixed(5)}_${lng.toFixed(5)}`;
+  }
+
+  function registerDangerZone(lat, lng, radius, severity) {
+    const k = _dangerKey(lat, lng);
+    if (!_dangerRegistry[k]) {
+      _dangerRegistry[k] = { lat, lng, radius: radius || 100, severity: severity || 3 };
+    }
+  }
+
   /* Default center (Ann Arbor) — will move to user's real location */
   const DEFAULT_CENTER = [42.2808, -83.7430];
   const DEFAULT_ZOOM = 15;
@@ -705,10 +724,14 @@ const MapModule = (() => {
           });
         });
         crimeMarkers.push(marker);
+
+        /* Persist this position in the danger registry */
+        const sev = CRIME_ICONS[crime.category]?.severity || 3;
+        registerDangerZone(clat, clng, 100, sev);
       });
 
       crimeLoaded = true;
-      console.info(`[Crime] UK: ${crimeMarkers.length} street-level incidents loaded.`);
+      console.info(`[Crime] UK: ${crimeMarkers.length} street-level incidents loaded (${Object.keys(_dangerRegistry).length} total in registry)`);
     } catch (err) {
       console.warn('[Crime] UK API error:', err);
       crimeLoaded = true;
@@ -810,10 +833,13 @@ const MapModule = (() => {
         });
 
         crimeMarkers.push(marker);
+
+        /* Persist this position in the danger registry */
+        registerDangerZone(clat, clng, 100, info.severity || 3);
       });
 
       crimeLoaded = true;
-      console.info(`[Crime] Detroit: ${crimeMarkers.length} street-level incidents loaded.`);
+      console.info(`[Crime] Detroit: ${crimeMarkers.length} street-level incidents loaded (${Object.keys(_dangerRegistry).length} total in registry)`);
     } catch (err) {
       console.warn('[Crime] Detroit API error:', err);
       /* Fall back to FBI for Michigan */
@@ -1003,10 +1029,13 @@ const MapModule = (() => {
         });
 
         crimeMarkers.push(marker);
+
+        /* Persist this position in the danger registry */
+        registerDangerZone(alat, alng, 120, 4);
       }
 
       crimeLoaded = true;
-      console.info(`[Crime] FBI: ${crimeMarkers.length} agency markers placed for ${stateAbbr}.`);
+      console.info(`[Crime] FBI: ${crimeMarkers.length} agency markers placed for ${stateAbbr} (${Object.keys(_dangerRegistry).length} total in registry)`);
     } catch (err) {
       console.warn('[Crime] FBI API error:', err);
       crimeLoaded = true;
@@ -1205,6 +1234,9 @@ const MapModule = (() => {
         });
       });
       hotspotMarkers.push(marker);
+
+      /* Persist in the danger registry so routing always sees them */
+      registerDangerZone(hs.lat, hs.lng, hs.radius, hs.severity);
     });
 
     if (circles.length > 0) {
@@ -1216,29 +1248,54 @@ const MapModule = (() => {
   /* ===== DANGER ZONES — combined real + simulated ===== */
   /**
    * Return an array of { lat, lng, radius (meters), severity } covering
-   * both *real* crime markers already on the map and simulated hotspots.
+   * both *real* crime markers and simulated hotspots.
+   *
+   * Sources (in priority order):
+   *  1. The persistent _dangerRegistry (all markers ever loaded this session)
+   *  2. Simulated hotspots regenerated for the bounds (catches cells not yet
+   *     rendered on-screen but inside the route corridor)
+   *  3. Current crimeMarkers array (belt-and-suspenders fallback)
+   *
    * @param {L.LatLngBounds} [bounds] — optional; defaults to current map view
    */
   function getDangerZones(bounds) {
     if (!bounds) bounds = map.getBounds();
     const zones = [];
+    const seen = new Set();
 
-    /* Real crime markers (UK/Detroit/FBI already on the map) */
+    /* 1. Persistent registry — already-loaded real + simulated */
+    Object.values(_dangerRegistry).forEach(dz => {
+      if (bounds.contains([dz.lat, dz.lng])) {
+        const k = _dangerKey(dz.lat, dz.lng);
+        seen.add(k);
+        zones.push(dz);
+      }
+    });
+
+    /* 2. Regenerate simulated hotspots for the requested bounds
+     *    (covers grid cells not yet visited / rendered)          */
+    const hotspots = getHotspotsForBounds(bounds);
+    hotspots.forEach(hs => {
+      const k = _dangerKey(hs.lat, hs.lng);
+      if (!seen.has(k)) {
+        seen.add(k);
+        zones.push({ lat: hs.lat, lng: hs.lng, radius: hs.radius, severity: hs.severity });
+      }
+    });
+
+    /* 3. Fallback — any live crimeMarkers not yet in the registry */
     crimeMarkers.forEach(m => {
       try {
         const ll = m.getLatLng();
-        if (bounds.contains(ll)) {
+        const k = _dangerKey(ll.lat, ll.lng);
+        if (!seen.has(k) && bounds.contains(ll)) {
+          seen.add(k);
           zones.push({ lat: ll.lat, lng: ll.lng, radius: 100, severity: 3 });
         }
       } catch (_) { /* marker may have been removed */ }
     });
 
-    /* Simulated hotspots */
-    const hotspots = getHotspotsForBounds(bounds);
-    hotspots.forEach(hs => {
-      zones.push({ lat: hs.lat, lng: hs.lng, radius: hs.radius, severity: hs.severity });
-    });
-
+    console.log(`[DangerZones] ${zones.length} zones returned (registry: ${Object.keys(_dangerRegistry).length}, regen: ${hotspots.length}, live markers: ${crimeMarkers.length})`);
     return zones;
   }
 
