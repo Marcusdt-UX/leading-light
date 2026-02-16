@@ -50,7 +50,126 @@ const RoutesModule = (() => {
     document.getElementById('directionsShowMap')?.addEventListener('click', showMapWithRoute);
   }
 
-  /* Fetch real routes from OSRM (free, no API key) */
+  /* ===== AVOIDANCE WAYPOINT ALGORITHM (two-pass) ===== */
+
+  /** Quick haversine-ish distance in metres (good enough for short ranges) */
+  function _quickDistMeters(lat1, lng1, lat2, lng2) {
+    const R = 6371000;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLng = (lng2 - lng1) * Math.PI / 180 * Math.cos(lat1 * Math.PI / 180);
+    return R * Math.sqrt(dLat * dLat + dLng * dLng);
+  }
+
+  /**
+   * Walk along a route's coordinate array and find segments that fall
+   * inside any danger zone.  Returns an array of { lat, lng, severity }
+   * representing the centres of route-danger intersections.
+   */
+  function findDangerIntersections(routeCoords, dangerZones) {
+    const hits = [];     /* { lat, lng, severity, idx } */
+    const step = Math.max(1, Math.floor(routeCoords.length / 120));
+
+    for (let i = 0; i < routeCoords.length; i += step) {
+      const [lat, lng] = routeCoords[i];
+      for (const dz of dangerZones) {
+        const d = _quickDistMeters(lat, lng, dz.lat, dz.lng);
+        /* Route point is inside the danger radius (+50 m buffer) */
+        if (d < (dz.radius || 100) + 50) {
+          hits.push({ lat, lng, dzLat: dz.lat, dzLng: dz.lng, severity: dz.severity || 3, idx: i });
+          break; /* one hit per sample point is enough */
+        }
+      }
+    }
+    return hits;
+  }
+
+  /**
+   * Given a set of danger-intersection hits along a route, cluster them
+   * and produce offset waypoints that push the route to the opposite side.
+   *
+   * @param {Array} routeCoords – [[lat,lng], …]
+   * @param {Array} hits – from findDangerIntersections
+   * @returns {Array<{lat,lng}>} – waypoints to insert into the OSRM query
+   */
+  function buildDetourWaypoints(routeCoords, hits) {
+    if (hits.length === 0) return [];
+
+    /* Cluster hits that are close together along the route index */
+    const clusters = [[hits[0]]];
+    for (let i = 1; i < hits.length; i++) {
+      const last = clusters[clusters.length - 1];
+      if (hits[i].idx - last[last.length - 1].idx < 20) {
+        last.push(hits[i]);
+      } else {
+        clusters.push([hits[i]]);
+      }
+    }
+
+    const waypoints = [];
+
+    clusters.forEach(cl => {
+      /* Centre of the cluster on the route */
+      const midIdx = Math.round(cl.reduce((s, h) => s + h.idx, 0) / cl.length);
+      const safeMid = Math.min(Math.max(midIdx, 2), routeCoords.length - 3);
+
+      /* Average danger-zone position */
+      const dzLat = cl.reduce((s, h) => s + h.dzLat, 0) / cl.length;
+      const dzLng = cl.reduce((s, h) => s + h.dzLng, 0) / cl.length;
+
+      /* Route position at the cluster centre */
+      const rLat = routeCoords[safeMid][0];
+      const rLng = routeCoords[safeMid][1];
+
+      /* Direction from the danger zone to the route point */
+      let awayLat = rLat - dzLat;
+      let awayLng = rLng - dzLng;
+      const len = Math.sqrt(awayLat * awayLat + awayLng * awayLng);
+
+      if (len < 0.000001) {
+        /* Route sits right on top of the danger zone — push perpendicular to the route direction */
+        const prev = routeCoords[Math.max(0, safeMid - 5)];
+        const next = routeCoords[Math.min(routeCoords.length - 1, safeMid + 5)];
+        const dx = next[1] - prev[1];
+        const dy = next[0] - prev[0];
+        const dLen = Math.sqrt(dx * dx + dy * dy) || 0.0001;
+        awayLat = -dx / dLen;  /* perpendicular */
+        awayLng = dy / dLen;
+      } else {
+        awayLat /= len;
+        awayLng /= len;
+      }
+
+      /* Offset distance: 350 m base + 80 m per cluster member (in degrees) */
+      const offsetDeg = (350 + cl.length * 80) / 111320;
+
+      waypoints.push({
+        lat: rLat + awayLat * offsetDeg,
+        lng: rLng + awayLng * offsetDeg
+      });
+    });
+
+    return waypoints.slice(0, 5); /* cap at 5 for OSRM performance */
+  }
+
+  /** Build an OSRM URL for foot routing */
+  function _osrmUrl(origin, destination, viaPoints) {
+    let coords = `${origin.lng},${origin.lat}`;
+    (viaPoints || []).forEach(wp => { coords += `;${wp.lng},${wp.lat}`; });
+    coords += `;${destination.lng},${destination.lat}`;
+    return `https://router.project-osrm.org/route/v1/foot/${coords}?overview=full&geometries=geojson&alternatives=true&steps=true`;
+  }
+
+  /** Fetch JSON from OSRM with a timeout */
+  async function _osrmFetch(url, timeoutMs) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs || 15000);
+    const resp = await fetch(url, { signal: ctrl.signal });
+    clearTimeout(timer);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return resp.json();
+  }
+
+  /* Fetch real routes from OSRM — **two-pass** avoidance routing */
   async function fetchRoutes(origin, destination) {
     const container = document.getElementById('routeOptions');
     if (!container) return;
@@ -61,31 +180,71 @@ const RoutesModule = (() => {
       <div class="route-card route-card--loading">
         <div class="route-card__info" style="text-align:center;width:100%;">
           <div class="route-card__name">Finding safest routes…</div>
-          <div class="route-card__meta">Calculating distance & time</div>
+          <div class="route-card__meta">Analyzing crime data & calculating detours</div>
         </div>
       </div>
     `;
 
     try {
-      /* OSRM demo server — request alternatives */
-      const url = `https://router.project-osrm.org/route/v1/foot/` +
-        `${origin.lng},${origin.lat};${destination.lng},${destination.lat}` +
-        `?overview=full&geometries=geojson&alternatives=true&steps=true`;
+      /* ── PASS 1: fetch the direct route so we know where it actually goes ── */
+      const directUrl = _osrmUrl(origin, destination);
+      console.log('[Routes] Pass 1 (direct):', directUrl);
+      const directData = await _osrmFetch(directUrl);
 
-      console.log('[Routes] Fetching:', url);
-      console.log('[Routes] Origin:', origin, 'Dest:', destination);
+      if (!directData.routes || directData.routes.length === 0) {
+        container.innerHTML = `
+          <div class="route-card">
+            <div class="route-card__info" style="text-align:center;width:100%;">
+              <div class="route-card__name" style="color:var(--red)">No walking route found</div>
+              <div class="route-card__meta">Try a closer destination</div>
+            </div>
+          </div>
+        `;
+        return;
+      }
 
-      /* Try with a timeout — OSRM demo can be slow */
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
+      /* ── Collect all danger zones in a generous bounding box ── */
+      const allCoordsDirect = directData.routes[0].geometry.coordinates.map(c => [c[1], c[0]]);
+      const routeLats = allCoordsDirect.map(c => c[0]);
+      const routeLngs = allCoordsDirect.map(c => c[1]);
+      const routeBounds = L.latLngBounds(
+        [Math.min(...routeLats) - 0.018, Math.min(...routeLngs) - 0.018],
+        [Math.max(...routeLats) + 0.018, Math.max(...routeLngs) + 0.018]
+      );
+      const dangerZones = MapModule.getDangerZones(routeBounds);
+      console.log(`[Routes] ${dangerZones.length} danger zones in route corridor`);
 
-      const resp = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeout);
+      /* ── Detect where the direct route passes through danger zones ── */
+      const hits = findDangerIntersections(allCoordsDirect, dangerZones);
+      console.log(`[Routes] ${hits.length} danger-zone intersections found on direct route`);
 
-      console.log('[Routes] Response status:', resp.status);
-      if (!resp.ok) throw new Error(`Routing request failed (HTTP ${resp.status})`);
+      let finalData;
+      if (hits.length > 0) {
+        /* ── PASS 2: re-route with avoidance waypoints ── */
+        const detourWPs = buildDetourWaypoints(allCoordsDirect, hits);
+        console.log(`[Routes] Inserting ${detourWPs.length} detour waypoint(s):`, detourWPs);
+        const safeUrl = _osrmUrl(origin, destination, detourWPs);
+        console.log('[Routes] Pass 2 (avoidance):', safeUrl);
 
-      const data = await resp.json();
+        try {
+          const safeData = await _osrmFetch(safeUrl, 12000);
+          if (safeData.routes && safeData.routes.length > 0) {
+            /* Merge: use **both** the safe-route set and the direct set,
+               then deduplicate later via safety scoring */
+            finalData = { routes: [...safeData.routes, ...directData.routes] };
+          } else {
+            finalData = directData;
+          }
+        } catch (e2) {
+          console.warn('[Routes] Avoidance pass failed, falling back to direct:', e2.message);
+          finalData = directData;
+        }
+      } else {
+        /* Direct route is already clear of danger zones */
+        finalData = directData;
+      }
+
+      const data = finalData;
 
       if (!data.routes || data.routes.length === 0) {
         container.innerHTML = `
@@ -99,10 +258,20 @@ const RoutesModule = (() => {
         return;
       }
 
-      /* Process routes — score safety using simulated crime hotspot proximity */
-      rawOsrmRoutes = data.routes;   /* stash raw for turn-by-turn later */
-      console.log('[Routes] ✅ Stored', rawOsrmRoutes.length, 'raw OSRM routes, indices:', rawOsrmRoutes.map((r,i) => i));
-      currentRoutes = data.routes.map((route, i) => {
+      /* Process routes — score safety using crime data proximity */
+      /* Deduplicate merged routes (same distance ± 50 m = likely same route) */
+      const dedupedRoutes = [];
+      const seenDist = new Set();
+      data.routes.forEach(r => {
+        const key = Math.round(r.distance / 50);
+        if (!seenDist.has(key)) { seenDist.add(key); dedupedRoutes.push(r); }
+      });
+      /* Cap at 4 routes max for readability */
+      const cappedRoutes = dedupedRoutes.slice(0, 4);
+
+      rawOsrmRoutes = cappedRoutes;
+      console.log('[Routes] ✅ Stored', rawOsrmRoutes.length, 'raw OSRM routes (deduped from', data.routes.length, ')');
+      currentRoutes = cappedRoutes.map((route, i) => {
         const durationMin = Math.round(route.duration / 60);
         const distanceKm = (route.distance / 1000).toFixed(1);
         const distanceMi = (route.distance / 1609.34).toFixed(1);

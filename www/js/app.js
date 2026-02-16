@@ -121,12 +121,26 @@ const App = (() => {
     /* Show splash first */
     showScreen('splashScreen', false);
 
-    /* After 2s → straight to map */
+    /* After 2s → check auth state */
     setTimeout(() => {
-      enterApp();
+      if (typeof AuthModule !== 'undefined' && AuthModule.isLoggedIn()) {
+        /* Already logged in — sync profile from account and go to map */
+        const user = AuthModule.getCurrentUser();
+        if (user) {
+          const profile = getProfile();
+          profile.name = user.name;
+          profile.email = user.email;
+          saveProfile(profile);
+          refreshProfileUI();
+        }
+        enterApp();
+      } else {
+        /* Not logged in — show welcome screen */
+        showScreen('welcomeScreen', false);
+      }
     }, 2000);
 
-    /* Keep event listeners in case user navigates back to auth screens */
+    /* Welcome screen buttons */
     document.getElementById('welcomeGetStarted')?.addEventListener('click', () => {
       showScreen('signupScreen');
     });
@@ -148,17 +162,34 @@ const App = (() => {
     /* Signup back button */
     document.getElementById('signupBack')?.addEventListener('click', () => goBack());
 
-    /* Login → forgot (no-op) */
+    /* Forgot password back button */
+    document.getElementById('forgotPasswordBack')?.addEventListener('click', () => goBack());
+
+    /* Login → forgot password */
+    document.getElementById('loginForgotLink')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      clearAuthError('loginError');
+      showScreen('forgotPasswordScreen');
+    });
+
+    /* Forgot → Login link */
+    document.getElementById('forgotToLogin')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      clearAuthError('forgotError');
+      showScreen('loginScreen');
+    });
 
     /* Login → Sign Up link */
     document.getElementById('loginToSignup')?.addEventListener('click', (e) => {
       e.preventDefault();
+      clearAuthError('loginError');
       showScreen('signupScreen');
     });
 
     /* Signup → Log In link */
     document.getElementById('signupToLogin')?.addEventListener('click', (e) => {
       e.preventDefault();
+      clearAuthError('signupError');
       showScreen('loginScreen');
     });
 
@@ -172,26 +203,115 @@ const App = (() => {
       enterApp();
     });
 
-    /* Login form submit → main app */
-    document.getElementById('loginForm')?.addEventListener('submit', (e) => {
+    /* ===== LOGIN FORM SUBMIT ===== */
+    document.getElementById('loginForm')?.addEventListener('submit', async (e) => {
       e.preventDefault();
-      enterApp();
+      clearAuthError('loginError');
+
+      const email = document.getElementById('loginEmail')?.value;
+      const password = document.getElementById('loginPassword')?.value;
+      const btn = document.getElementById('loginSubmitBtn');
+
+      if (btn) { btn.disabled = true; btn.textContent = 'Logging in…'; }
+
+      try {
+        const result = await AuthModule.login(email, password);
+        if (result.ok) {
+          /* Sync profile */
+          const profile = getProfile();
+          profile.name = result.user.name;
+          profile.email = result.user.email;
+          saveProfile(profile);
+          refreshProfileUI();
+          enterApp();
+          document.getElementById('loginForm')?.reset();
+        } else {
+          showAuthError('loginError', result.error);
+        }
+      } catch (err) {
+        showAuthError('loginError', 'Something went wrong. Please try again.');
+        console.error('[Auth] Login error:', err);
+      }
+
+      if (btn) { btn.disabled = false; btn.textContent = 'Log In'; }
     });
 
-    /* Signup form submit → main app */
-    document.getElementById('signupForm')?.addEventListener('submit', (e) => {
+    /* ===== SIGNUP FORM SUBMIT ===== */
+    document.getElementById('signupForm')?.addEventListener('submit', async (e) => {
       e.preventDefault();
-      /* Save name/email from signup */
-      const inputs = e.target.querySelectorAll('.form-field__input');
-      if (inputs.length >= 2) {
-        const profile = getProfile();
-        profile.name = inputs[0].value || profile.name;
-        profile.email = inputs[1].value || profile.email;
-        saveProfile(profile);
-        refreshProfileUI();
+      clearAuthError('signupError');
+
+      const name = document.getElementById('signupName')?.value;
+      const email = document.getElementById('signupEmail')?.value;
+      const password = document.getElementById('signupPassword')?.value;
+      const confirmPassword = document.getElementById('signupConfirmPassword')?.value;
+      const btn = document.getElementById('signupSubmitBtn');
+
+      if (btn) { btn.disabled = true; btn.textContent = 'Creating account…'; }
+
+      try {
+        const result = await AuthModule.signup(name, email, password, confirmPassword);
+        if (result.ok) {
+          /* Save profile */
+          const profile = getProfile();
+          profile.name = result.user.name;
+          profile.email = result.user.email;
+          saveProfile(profile);
+          refreshProfileUI();
+          enterApp();
+          showToast('Account created successfully!');
+          document.getElementById('signupForm')?.reset();
+        } else {
+          showAuthError('signupError', result.error);
+        }
+      } catch (err) {
+        showAuthError('signupError', 'Something went wrong. Please try again.');
+        console.error('[Auth] Signup error:', err);
       }
-      enterApp();
+
+      if (btn) { btn.disabled = false; btn.textContent = 'Create Account'; }
     });
+
+    /* ===== FORGOT PASSWORD FORM SUBMIT ===== */
+    document.getElementById('forgotPasswordForm')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      clearAuthError('forgotError');
+
+      const email = document.getElementById('forgotEmail')?.value;
+      const newPass = document.getElementById('forgotNewPass')?.value;
+      const confirmPass = document.getElementById('forgotConfirmPass')?.value;
+
+      try {
+        const result = await AuthModule.resetPassword(email, newPass, confirmPass);
+        if (result.ok) {
+          showToast('Password reset! You can now log in.');
+          document.getElementById('forgotPasswordForm')?.reset();
+          showScreen('loginScreen');
+        } else {
+          showAuthError('forgotError', result.error);
+        }
+      } catch (err) {
+        showAuthError('forgotError', 'Something went wrong. Please try again.');
+        console.error('[Auth] Reset error:', err);
+      }
+    });
+  }
+
+  /* ===== AUTH ERROR HELPERS ===== */
+  function showAuthError(elementId, message) {
+    const el = document.getElementById(elementId);
+    if (el) {
+      el.textContent = message;
+      el.classList.add('active');
+    }
+  }
+
+  function clearAuthError(elementId) {
+    const el = document.getElementById(elementId);
+    if (el) {
+      el.textContent = '';
+      el.classList.remove('active');
+    }
   }
 
   function enterApp() {
@@ -603,17 +723,60 @@ const App = (() => {
     });
 
     /* Password form */
-    document.getElementById('passwordForm')?.addEventListener('submit', (e) => {
+    document.getElementById('passwordForm')?.addEventListener('submit', async (e) => {
       e.preventDefault();
-      showToast('Password updated successfully');
-      e.target.reset();
-      setTimeout(() => goBack(), 800);
+      clearAuthError('passwordError');
+
+      const current = document.getElementById('currentPasswordInput')?.value;
+      const newPass = document.getElementById('newPasswordInput')?.value;
+      const confirm = document.getElementById('confirmNewPasswordInput')?.value;
+      const btn = document.getElementById('passwordSubmitBtn');
+
+      if (typeof AuthModule !== 'undefined' && AuthModule.isLoggedIn()) {
+        if (btn) { btn.disabled = true; btn.textContent = 'Updating…'; }
+        try {
+          const result = await AuthModule.changePassword(current, newPass, confirm);
+          if (result.ok) {
+            showToast('Password updated successfully');
+            e.target.reset();
+            clearAuthError('passwordError');
+            setTimeout(() => goBack(), 800);
+          } else {
+            showAuthError('passwordError', result.error);
+          }
+        } catch (err) {
+          showAuthError('passwordError', 'Something went wrong.');
+          console.error('[Auth] Password change error:', err);
+        }
+        if (btn) { btn.disabled = false; btn.textContent = 'Update Password'; }
+      } else {
+        showToast('Password updated successfully');
+        e.target.reset();
+        setTimeout(() => goBack(), 800);
+      }
     });
 
     /* Logout from settings */
     document.getElementById('settingsLogoutBtn')?.addEventListener('click', () => {
+      if (typeof AuthModule !== 'undefined') AuthModule.logout();
       screenHistory = [];
       showScreen('welcomeScreen', false);
+      showToast('Logged out');
+    });
+
+    /* Delete account from settings */
+    document.getElementById('settingsDeleteAccountBtn')?.addEventListener('click', () => {
+      if (confirm('Are you sure you want to delete your account? This cannot be undone.')) {
+        if (typeof AuthModule !== 'undefined') {
+          AuthModule.deleteAccount();
+        }
+        /* Clear all user data */
+        localStorage.removeItem(PROFILE_KEY);
+        localStorage.removeItem(CONTACTS_KEY);
+        screenHistory = [];
+        showScreen('welcomeScreen', false);
+        showToast('Account deleted');
+      }
     });
   }
 
@@ -627,6 +790,12 @@ const App = (() => {
         phone: document.getElementById('profilePhone')?.value || ''
       };
       saveProfile(profile);
+
+      /* Also update the account name if logged in */
+      if (typeof AuthModule !== 'undefined' && AuthModule.isLoggedIn()) {
+        AuthModule.updateAccountName(profile.name);
+      }
+
       refreshProfileUI();
       showToast('Profile saved');
     });

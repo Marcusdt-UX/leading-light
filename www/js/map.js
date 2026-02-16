@@ -48,6 +48,83 @@ const MapModule = (() => {
       loadBuildings();
       renderHotspots();
     }, 1500));
+
+    /* ===== LONG-PRESS TO ROUTE ===== */
+    let _lpTimer = null;
+    let _lpMoved = false;
+
+    function startLongPress(e) {
+      _lpMoved = false;
+      _lpTimer = setTimeout(() => {
+        if (_lpMoved) return;
+        handleLongPress(e.latlng);
+      }, 600);
+    }
+    function cancelLongPress() {
+      _lpMoved = true;
+      clearTimeout(_lpTimer);
+    }
+
+    map.on('mousedown',  startLongPress);
+    map.on('touchstart', (e) => {
+      if (e.originalEvent && e.originalEvent.touches && e.originalEvent.touches.length === 1) {
+        startLongPress(e);
+      }
+    });
+    map.on('mousemove',  cancelLongPress);
+    map.on('touchmove',  cancelLongPress);
+    map.on('mouseup',    cancelLongPress);
+    map.on('touchend',   cancelLongPress);
+    map.on('dragstart',  cancelLongPress);
+
+    function handleLongPress(latlng) {
+      /* Reverse-geocode the tapped point */
+      const lat = latlng.lat.toFixed(6);
+      const lng = latlng.lng.toFixed(6);
+
+      /* Drop a destination marker immediately */
+      clearDestination();
+      setDestination([latlng.lat, latlng.lng], `${lat}, ${lng}`);
+
+      /* Show bottom sheet with placeholder while reverse-geocoding */
+      const userPos = getUserPosition();
+      const dist = map.distance([userPos.lat, userPos.lng], [latlng.lat, latlng.lng]);
+      const distStr = dist < 1000 ? `${Math.round(dist)}m away` : `${(dist / 1609.34).toFixed(1)} mi away`;
+
+      showBottomSheet({
+        title: '\ud83d\udccd Dropped Pin',
+        desc: 'Resolving address\u2026',
+        time: '',
+        distance: distStr,
+        lat: latlng.lat,
+        lng: latlng.lng,
+        routable: true
+      });
+
+      /* Attempt reverse geocode */
+      fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&addressdetails=1`, {
+        headers: { 'Accept-Language': 'en' }
+      })
+        .then(r => r.json())
+        .then(data => {
+          const name = data.display_name || `${lat}, ${lng}`;
+          const short = data.address
+            ? [data.address.road, data.address.city || data.address.town || data.address.village].filter(Boolean).join(', ') || name
+            : name;
+          clearDestination();
+          setDestination([latlng.lat, latlng.lng], short);
+          showBottomSheet({
+            title: '\ud83d\udccd ' + short,
+            desc: name,
+            time: '',
+            distance: distStr,
+            lat: latlng.lat,
+            lng: latlng.lng,
+            routable: true
+          });
+        })
+        .catch(() => { /* keep the coordinate-based sheet */ });
+    }
   }
 
   /* ===== USER LOCATION ===== */
@@ -399,11 +476,12 @@ const MapModule = (() => {
 
       showBottomSheet({
         title: `${emoji} ${category}`,
-        desc: 'Community safety report in this area. Tap "Get the Route" to navigate around it.',
+        desc: 'Community safety report in this area.',
         time: 'Just now',
         distance: distStr,
         lat: latlng[0],
-        lng: latlng[1]
+        lng: latlng[1],
+        routable: false
       });
     });
 
@@ -420,23 +498,28 @@ const MapModule = (() => {
       time: 'Just now',
       distance: distStr,
       lat: latlng[0],
-      lng: latlng[1]
+      lng: latlng[1],
+      routable: false
     });
 
     return marker;
   }
 
   /* ===== BOTTOM SHEET HELPER ===== */
-  function showBottomSheet({ title, desc, time, distance, lat, lng }) {
+  function showBottomSheet({ title, desc, time, distance, lat, lng, routable }) {
     const sheet = document.getElementById('bottomSheet');
     const titleEl = document.getElementById('sheetTitle');
     const descEl = document.getElementById('sheetDesc');
     const timeEl = document.getElementById('sheetTime');
     const distEl = document.getElementById('sheetDistance');
+    const routeBtn = document.getElementById('sheetRouteBtn');
     if (titleEl) titleEl.textContent = title;
     if (descEl) descEl.textContent = desc || '';
     if (timeEl) timeEl.textContent = time || '';
     if (distEl) distEl.textContent = distance || '';
+
+    /* Show or hide the route button */
+    if (routeBtn) routeBtn.style.display = (routable === false) ? 'none' : '';
 
     /* Store coords so "Get the Route" can use them */
     if (sheet) {
@@ -490,6 +573,30 @@ const MapModule = (() => {
   };
 
   let _cachedCountry = null;   /* { code, state } — avoids re-geocoding on every pan */
+
+  /*
+   * Spatial thinning — keep only items that are at least `minDist` metres apart.
+   * Items earlier in the array have priority (so sort by severity first).
+   * Each item must expose lat/lng via the `latFn`/`lngFn` accessors.
+   */
+  function thinByDistance(items, minDist, latFn, lngFn) {
+    const kept = [];
+    for (const item of items) {
+      const lat = latFn(item);
+      const lng = lngFn(item);
+      if (isNaN(lat) || isNaN(lng)) continue;
+      let tooClose = false;
+      for (const k of kept) {
+        const dlat = lat - latFn(k);
+        const dlng = lng - lngFn(k);
+        /* Quick Euclidean approximation in metres (good enough for short distances) */
+        const d = Math.sqrt(dlat * dlat + dlng * dlng) * 111320;
+        if (d < minDist) { tooClose = true; break; }
+      }
+      if (!tooClose) kept.push(item);
+    }
+    return kept;
+  }
 
   /* ---- dispatcher ---- */
   async function loadCrimeData() {
@@ -555,7 +662,15 @@ const MapModule = (() => {
         return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
       });
 
-      crimes.slice(0, 150).forEach(crime => {
+      /* Thin out spatially — keep ≥80 m apart, cap at 60 markers */
+      const thinned = thinByDistance(
+        crimes,
+        80,
+        c => parseFloat(c.location?.latitude),
+        c => parseFloat(c.location?.longitude)
+      ).slice(0, 60);
+
+      thinned.forEach(crime => {
         const clat = parseFloat(crime.location?.latitude);
         const clng = parseFloat(crime.location?.longitude);
         if (isNaN(clat) || isNaN(clng)) return;
@@ -585,7 +700,8 @@ const MapModule = (() => {
             title: `${info.emoji} ${cat.charAt(0).toUpperCase() + cat.slice(1)}`,
             desc: `Reported on or near ${streetName}.${crime.outcome_status ? ' Outcome: ' + crime.outcome_status.category + '.' : ''}`,
             time: month || 'Recent',
-            distance: distStr, lat: clat, lng: clng
+            distance: distStr, lat: clat, lng: clng,
+            routable: false
           });
         });
         crimeMarkers.push(marker);
@@ -635,7 +751,15 @@ const MapModule = (() => {
       crimeMarkers.forEach(m => m.remove());
       crimeMarkers = [];
 
-      incidents.forEach(inc => {
+      /* Thin out spatially — keep ≥80 m apart, cap at 60 markers */
+      const thinned = thinByDistance(
+        incidents,
+        80,
+        i => parseFloat(i.latitude),
+        i => parseFloat(i.longitude)
+      ).slice(0, 60);
+
+      thinned.forEach(inc => {
         const clat = parseFloat(inc.latitude);
         const clng = parseFloat(inc.longitude);
         if (isNaN(clat) || isNaN(clng)) return;
@@ -680,7 +804,8 @@ const MapModule = (() => {
             desc: `${desc}\n📍 ${address}${ts ? '\n🕐 ' + new Date(ts).toLocaleString() : ''}`,
             time: timeStr,
             distance: distStr,
-            lat: clat, lng: clng
+            lat: clat, lng: clng,
+            routable: false
           });
         });
 
@@ -807,7 +932,8 @@ const MapModule = (() => {
             desc: 'Loading FBI crime data…',
             time: `${stateAbbr}`,
             distance: distStr,
-            lat: alat, lng: alng
+            lat: alat, lng: alng,
+            routable: false
           });
 
           if (!ori) return;
@@ -826,7 +952,8 @@ const MapModule = (() => {
                 desc: `No detailed crime breakdown available for ${dataYear}. The agency may not have reported to the FBI UCR program this year.`,
                 time: stateAbbr,
                 distance: distStr,
-                lat: alat, lng: alng
+                lat: alat, lng: alng,
+                routable: false
               });
               return;
             }
@@ -838,7 +965,8 @@ const MapModule = (() => {
               desc: summary,
               time: `${dataYear} data · ${stateAbbr}`,
               distance: distStr,
-              lat: alat, lng: alng
+              lat: alat, lng: alng,
+              routable: false
             });
           } catch (statsErr) {
             /* Try state-level estimates as fallback */
@@ -854,7 +982,8 @@ const MapModule = (() => {
                     desc: buildStateEstimateSummary(est, stateAbbr, dataYear),
                     time: `${dataYear} state data · ${stateAbbr}`,
                     distance: distStr,
-                    lat: alat, lng: alng
+                    lat: alat, lng: alng,
+                    routable: false
                   });
                   return;
                 }
@@ -864,7 +993,8 @@ const MapModule = (() => {
                 desc: 'Crime statistics temporarily unavailable for this agency.',
                 time: stateAbbr,
                 distance: distStr,
-                lat: alat, lng: alng
+                lat: alat, lng: alng,
+                routable: false
               });
             } catch {
               /* already showing something, just leave it */
@@ -976,7 +1106,7 @@ const MapModule = (() => {
     if (_hotspotCache[cellKey]) return _hotspotCache[cellKey];
 
     const rng = seededRng(hashStr(cellKey));
-    const count = Math.floor(rng() * 6) + 2;  /* 2-7 hotspots per cell */
+    const count = Math.floor(rng() * 2) + (rng() < 0.4 ? 1 : 0);  /* 0-2 hotspots per cell */
     const hotspots = [];
 
     for (let i = 0; i < count; i++) {
@@ -1070,7 +1200,8 @@ const MapModule = (() => {
           desc: `${hs.recentCount} incident${hs.recentCount > 1 ? 's' : ''} reported recently. Severity: ${'●'.repeat(hs.severity)}${'○'.repeat(5 - hs.severity)}`,
           time: 'Simulated data',
           distance: distStr,
-          lat: hs.lat, lng: hs.lng
+          lat: hs.lat, lng: hs.lng,
+          routable: false
         });
       });
       hotspotMarkers.push(marker);
@@ -1082,7 +1213,36 @@ const MapModule = (() => {
     }
   }
 
-  /* Public: score a route's safety based on hotspot proximity */
+  /* ===== DANGER ZONES — combined real + simulated ===== */
+  /**
+   * Return an array of { lat, lng, radius (meters), severity } covering
+   * both *real* crime markers already on the map and simulated hotspots.
+   * @param {L.LatLngBounds} [bounds] — optional; defaults to current map view
+   */
+  function getDangerZones(bounds) {
+    if (!bounds) bounds = map.getBounds();
+    const zones = [];
+
+    /* Real crime markers (UK/Detroit/FBI already on the map) */
+    crimeMarkers.forEach(m => {
+      try {
+        const ll = m.getLatLng();
+        if (bounds.contains(ll)) {
+          zones.push({ lat: ll.lat, lng: ll.lng, radius: 100, severity: 3 });
+        }
+      } catch (_) { /* marker may have been removed */ }
+    });
+
+    /* Simulated hotspots */
+    const hotspots = getHotspotsForBounds(bounds);
+    hotspots.forEach(hs => {
+      zones.push({ lat: hs.lat, lng: hs.lng, radius: hs.radius, severity: hs.severity });
+    });
+
+    return zones;
+  }
+
+  /* Public: score a route's safety based on hotspot + real crime proximity */
   function scoreRouteSafety(coords) {
     if (!coords || coords.length === 0) return 85;
 
@@ -1094,20 +1254,21 @@ const MapModule = (() => {
       [Math.max(...lats) + 0.005, Math.max(...lngs) + 0.005]
     );
 
-    const hotspots = getHotspotsForBounds(bounds);
+    /* Use combined danger zones (real + simulated) */
+    const zones = getDangerZones(bounds);
     let dangerScore = 0;
 
     /* Sample every 5th coord to keep it fast */
     const step = Math.max(1, Math.floor(coords.length / 60));
     for (let i = 0; i < coords.length; i += step) {
       const [lat, lng] = coords[i];
-      for (const hs of hotspots) {
-        const d = quickDist(lat, lng, hs.lat, hs.lng);
-        const dangerRadius = hs.radius / 111320; /* meters → degrees approx */
+      for (const z of zones) {
+        const d = quickDist(lat, lng, z.lat, z.lng);
+        const dangerRadius = z.radius / 111320; /* meters → degrees approx */
         if (d < dangerRadius * 2) {
-          /* Inside or near the danger zone */
           const proximity = 1 - Math.min(d / (dangerRadius * 2), 1);
-          dangerScore += proximity * hs.severity * hs.recentCount * 0.4;
+          const incidents = z.recentCount || 1;
+          dangerScore += proximity * z.severity * incidents * 0.4;
         }
       }
     }
@@ -1148,7 +1309,7 @@ const MapModule = (() => {
     init, locateUser, goHome, getMap, getUserPosition,
     addReportMarker, flyTo, setDestination, clearDestination,
     showBottomSheet, hideBottomSheet,
-    scoreRouteSafety, getHotspotsForBounds, renderHotspots
+    scoreRouteSafety, getHotspotsForBounds, getDangerZones, renderHotspots
   };
 })();
 
