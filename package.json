@@ -1,0 +1,25 @@
+{
+  "name": "leading-light",
+  "version": "1.0.0",
+  "description": "Leading Light – Safety Navigation App",
+  "main": "index.html",
+  "scripts": {
+    "build:web": "powershell -Command \"Remove-Item -Recurse -Force www -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force www; Copy-Item index.html www/; Copy-Item -Recurse css www/; Copy-Item -Recurse js www/; Copy-Item -Recurse images www/; Copy-Item manifest.json www/; Copy-Item sw.js www/\"",
+    "sync": "npx cap sync android",
+    "build": "npm run build:web && npm run sync",
+    "open": "npx cap open android",
+    "serve": "python -m http.server 8090 --bind 0.0.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Marcusdt-UX/leading-light.git"
+  },
+  "keywords": ["safety", "navigation", "pwa", "android"],
+  "author": "Marcus",
+  "license": "ISC",
+  "dependencies": {
+    "@capacitor/android": "^8.1.0",
+    "@capacitor/cli": "^8.1.0",
+    "@capacitor/core": "^8.1.0"
+  }
+}
