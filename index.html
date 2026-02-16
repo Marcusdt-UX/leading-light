@@ -165,6 +165,22 @@
     <!-- Map -->
     <div id="map" class="map"></div>
 
+    <!-- Map legend (collapsible) -->
+    <div class="map-legend" id="mapLegend">
+      <button class="map-legend__toggle" id="legendToggle" aria-label="Toggle legend">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z"/></svg>
+      </button>
+      <div class="map-legend__body" id="legendBody">
+        <div class="map-legend__item"><span class="map-legend__swatch" style="background:#2E9AFE"></span>River / Canal</div>
+        <div class="map-legend__item"><span class="map-legend__swatch" style="background:#5BC0EB"></span>Stream</div>
+        <div class="map-legend__item"><span class="map-legend__swatch" style="background:#0d3b66"></span>Lake / Reservoir</div>
+        <div class="map-legend__item"><span class="map-legend__swatch" style="background:#2E8B57"></span>Park / Garden</div>
+        <div class="map-legend__item"><span class="map-legend__swatch" style="background:#0B6623"></span>Forest / Woods</div>
+        <div class="map-legend__item"><span class="map-legend__swatch map-legend__swatch--rail"></span>Railway</div>
+        <div class="map-legend__item"><span class="map-legend__swatch" style="background:#1e1e34;border:1px solid #3a3a5c"></span>Building</div>
+      </div>
+    </div>
+
     <!-- Bottom sheet -->
     <div class="bottom-sheet hidden" id="bottomSheet">
       <div class="bottom-sheet__handle" id="sheetHandle"></div>

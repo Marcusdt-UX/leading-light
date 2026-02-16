@@ -70,6 +70,7 @@ const App = (() => {
     setupFeedback();
     setupShareLocation();
     setupShareBanner();
+    setupMapLegend();
 
     /* Populate profile data everywhere */
     refreshProfileUI();
@@ -1069,6 +1070,18 @@ const App = (() => {
     toast.textContent = message;
     toast.classList.add('active');
     setTimeout(() => toast.classList.remove('active'), 2500);
+  }
+
+  /* ===== MAP LEGEND TOGGLE ===== */
+  function setupMapLegend() {
+    const legend = document.getElementById('mapLegend');
+    const toggle = document.getElementById('legendToggle');
+    if (!legend || !toggle) return;
+    toggle.addEventListener('click', () => legend.classList.toggle('open'));
+    /* Close legend when clicking elsewhere on the map */
+    document.getElementById('map')?.addEventListener('click', () => {
+      legend.classList.remove('open');
+    });
   }
 
   /* ===== EXPOSE CONTACTS FOR OTHER MODULES ===== */

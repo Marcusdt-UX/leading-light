@@ -57,6 +57,9 @@ const MapModule = (() => {
     map.once('moveend', () => {
       loadNearbyPOIs();
       loadBuildings();
+      loadWaterFeatures();
+      loadGreenSpaces();
+      loadRailways();
       renderHotspots();
     });
 
@@ -65,6 +68,9 @@ const MapModule = (() => {
       if (poiLoaded) loadNearbyPOIs();
       if (crimeLoaded) loadCrimeData();
       loadBuildings();
+      loadWaterFeatures();
+      loadGreenSpaces();
+      loadRailways();
       renderHotspots();
     }, 1500));
 
@@ -414,6 +420,242 @@ const MapModule = (() => {
       }
     } catch (err) {
       if (err.name !== 'AbortError') console.warn('[Map] Building fetch failed:', err);
+    }
+  }
+
+  /* ===== WATER FEATURES (rivers, lakes, canals, streams) ===== */
+  let waterLayer = null;
+  let _waterAbort = null;
+
+  async function loadWaterFeatures() {
+    const zoom = map.getZoom();
+    if (zoom < 13) {
+      if (waterLayer) { waterLayer.remove(); waterLayer = null; }
+      return;
+    }
+
+    const bounds = map.getBounds();
+    const bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
+
+    if (_waterAbort) _waterAbort.abort();
+    _waterAbort = new AbortController();
+
+    /* Fetch waterways (lines) and water bodies (areas) */
+    const query = `[out:json][timeout:12];(
+      way["waterway"](${bbox});
+      way["natural"="water"](${bbox});
+      relation["natural"="water"](${bbox});
+      way["landuse"="reservoir"](${bbox});
+      way["landuse"="basin"](${bbox});
+    );out body;>;out skel qt;`;
+    const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
+
+    try {
+      const resp = await fetch(url, { signal: _waterAbort.signal });
+      if (!resp.ok) return;
+      const data = await resp.json();
+
+      const nodes = {};
+      data.elements.forEach(el => {
+        if (el.type === 'node') nodes[el.id] = [el.lat, el.lon];
+      });
+
+      if (waterLayer) { waterLayer.remove(); waterLayer = null; }
+
+      const layers = [];
+      data.elements.forEach(el => {
+        if (el.type !== 'way' || !el.nodes) return;
+        const coords = el.nodes.map(nid => nodes[nid]).filter(Boolean);
+        if (coords.length < 2) return;
+
+        const tags = el.tags || {};
+        const isArea = tags.natural === 'water' || tags.landuse === 'reservoir'
+                    || tags.landuse === 'basin';
+        const isRiver = tags.waterway === 'river' || tags.waterway === 'canal';
+        const isStream = tags.waterway === 'stream' || tags.waterway === 'ditch'
+                      || tags.waterway === 'drain';
+
+        if (isArea && coords.length >= 3) {
+          /* Water body polygon */
+          layers.push(L.polygon(coords, {
+            color: '#1a6aa5',
+            fillColor: '#0d3b66',
+            fillOpacity: 0.55,
+            weight: 1,
+            interactive: false
+          }));
+        } else if (isRiver) {
+          /* Rivers & canals — thick blue line */
+          layers.push(L.polyline(coords, {
+            color: '#2E9AFE',
+            weight: zoom >= 16 ? 5 : 3,
+            opacity: 0.8,
+            lineCap: 'round',
+            lineJoin: 'round',
+            interactive: false
+          }));
+        } else if (isStream) {
+          /* Streams & ditches — thin lighter blue */
+          layers.push(L.polyline(coords, {
+            color: '#5BC0EB',
+            weight: zoom >= 16 ? 2.5 : 1.5,
+            opacity: 0.65,
+            dashArray: '6,4',
+            lineCap: 'round',
+            interactive: false
+          }));
+        } else {
+          /* Other waterways */
+          layers.push(L.polyline(coords, {
+            color: '#2E9AFE',
+            weight: 2,
+            opacity: 0.6,
+            interactive: false
+          }));
+        }
+      });
+
+      if (layers.length > 0) {
+        waterLayer = L.layerGroup(layers).addTo(map);
+        waterLayer.eachLayer(l => l.bringToBack && l.bringToBack());
+      }
+      console.log(`[Map] Loaded ${layers.length} water features`);
+    } catch (err) {
+      if (err.name !== 'AbortError') console.warn('[Map] Water fetch failed:', err);
+    }
+  }
+
+  /* ===== GREEN SPACES (parks, forests, gardens, nature reserves) ===== */
+  let greenLayer = null;
+  let _greenAbort = null;
+
+  async function loadGreenSpaces() {
+    const zoom = map.getZoom();
+    if (zoom < 13) {
+      if (greenLayer) { greenLayer.remove(); greenLayer = null; }
+      return;
+    }
+
+    const bounds = map.getBounds();
+    const bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
+
+    if (_greenAbort) _greenAbort.abort();
+    _greenAbort = new AbortController();
+
+    const query = `[out:json][timeout:12];(
+      way["leisure"="park"](${bbox});
+      way["leisure"="garden"](${bbox});
+      way["leisure"="nature_reserve"](${bbox});
+      way["landuse"="forest"](${bbox});
+      way["landuse"="grass"](${bbox});
+      way["landuse"="meadow"](${bbox});
+      way["natural"="wood"](${bbox});
+      way["landuse"="recreation_ground"](${bbox});
+      relation["leisure"="park"](${bbox});
+    );out body;>;out skel qt;`;
+    const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
+
+    try {
+      const resp = await fetch(url, { signal: _greenAbort.signal });
+      if (!resp.ok) return;
+      const data = await resp.json();
+
+      const nodes = {};
+      data.elements.forEach(el => {
+        if (el.type === 'node') nodes[el.id] = [el.lat, el.lon];
+      });
+
+      if (greenLayer) { greenLayer.remove(); greenLayer = null; }
+
+      const layers = [];
+      data.elements.forEach(el => {
+        if (el.type !== 'way' || !el.nodes) return;
+        const coords = el.nodes.map(nid => nodes[nid]).filter(Boolean);
+        if (coords.length < 3) return;
+
+        const tags = el.tags || {};
+        const isForest = tags.landuse === 'forest' || tags.natural === 'wood';
+
+        layers.push(L.polygon(coords, {
+          color: isForest ? '#0B6623' : '#2E8B57',
+          fillColor: isForest ? '#0a3d14' : '#1a5c38',
+          fillOpacity: isForest ? 0.45 : 0.35,
+          weight: 1,
+          interactive: false
+        }));
+      });
+
+      if (layers.length > 0) {
+        greenLayer = L.layerGroup(layers).addTo(map);
+        greenLayer.eachLayer(l => l.bringToBack && l.bringToBack());
+      }
+      console.log(`[Map] Loaded ${layers.length} green spaces`);
+    } catch (err) {
+      if (err.name !== 'AbortError') console.warn('[Map] Green spaces fetch failed:', err);
+    }
+  }
+
+  /* ===== RAILWAYS ===== */
+  let railLayer = null;
+  let _railAbort = null;
+
+  async function loadRailways() {
+    const zoom = map.getZoom();
+    if (zoom < 13) {
+      if (railLayer) { railLayer.remove(); railLayer = null; }
+      return;
+    }
+
+    const bounds = map.getBounds();
+    const bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
+
+    if (_railAbort) _railAbort.abort();
+    _railAbort = new AbortController();
+
+    const query = `[out:json][timeout:10];(
+      way["railway"="rail"](${bbox});
+      way["railway"="light_rail"](${bbox});
+      way["railway"="subway"](${bbox});
+      way["railway"="tram"](${bbox});
+    );out body;>;out skel qt;`;
+    const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
+
+    try {
+      const resp = await fetch(url, { signal: _railAbort.signal });
+      if (!resp.ok) return;
+      const data = await resp.json();
+
+      const nodes = {};
+      data.elements.forEach(el => {
+        if (el.type === 'node') nodes[el.id] = [el.lat, el.lon];
+      });
+
+      if (railLayer) { railLayer.remove(); railLayer = null; }
+
+      const layers = [];
+      data.elements.forEach(el => {
+        if (el.type !== 'way' || !el.nodes) return;
+        const coords = el.nodes.map(nid => nodes[nid]).filter(Boolean);
+        if (coords.length < 2) return;
+
+        /* Dashed white-grey line that looks like rail tracks */
+        layers.push(L.polyline(coords, {
+          color: '#aaaacc',
+          weight: zoom >= 16 ? 3 : 2,
+          opacity: 0.6,
+          dashArray: '8,6',
+          lineCap: 'butt',
+          interactive: false
+        }));
+      });
+
+      if (layers.length > 0) {
+        railLayer = L.layerGroup(layers).addTo(map);
+        railLayer.eachLayer(l => l.bringToBack && l.bringToBack());
+      }
+      console.log(`[Map] Loaded ${layers.length} railway segments`);
+    } catch (err) {
+      if (err.name !== 'AbortError') console.warn('[Map] Railway fetch failed:', err);
     }
   }
 
